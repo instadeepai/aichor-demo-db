@@ -143,6 +143,8 @@ def training_function(args: argparse.Namespace):
         exit(0)
     
     signal.signal(signal.SIGTERM, handle_sigterm)
+    signal.signal(signal.SIGKILL, handle_sigterm)
+    signal.signal(signal.SIGINT, handle_sigterm)
 
     for epoch in range(starting_epoch, args.num_epochs):
         model.train()
