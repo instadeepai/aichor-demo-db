@@ -1,6 +1,7 @@
 import os
 import time
 import argparse
+import signal
 
 import s3fs
 
@@ -14,7 +15,7 @@ from transformers import get_linear_schedule_with_warmup, set_seed
 from accelerate import Accelerator
 from accelerate.utils import ProjectConfiguration
 
-from utils import get_dataset, get_tokenizer, get_model, save_final_model, TENSORBOARD_PATH, AWS_ENDPOINT_URL
+from utils import get_dataset, get_tokenizer, get_model, save_final_model, TENSORBOARD_PATH, AWS_ENDPOINT_URL, save_checkpoint, load_checkpoint, get_last_checkpoint_path
 
 SEED = 42
 
@@ -27,6 +28,9 @@ def training_function(args: argparse.Namespace):
         mixed_precision=args.mixed_precision,
         project_dir=LOCAL_PROJECT_DIR,
         project_config=ProjectConfiguration(
+            automatic_checkpoint_naming=True,
+            project_dir=LOCAL_PROJECT_DIR,
+            total_limit=1,
             logging_dir=os.environ.get(TENSORBOARD_PATH),
         ),
         log_with="tensorboard",
@@ -114,15 +118,33 @@ def training_function(args: argparse.Namespace):
         model, optimizer, train_dataloader, eval_dataloader, lr_scheduler
     )
 
-    # We need to keep track of how many total steps we have iterated over
-    overall_step = 0
+    starting_epoch = 0
+
+    if accelerator.is_main_process and args.enable_checkpointing:
+        checkpoint_path = args.load_checkpoint_name
+        if args.load_checkpoint_name == None:
+            checkpoint_path = get_last_checkpoint_path(checkpoint_dir=args.checkpoint_dir, s3=s3)
+        if checkpoint_path != None:
+            starting_epoch = load_checkpoint(accelerator=accelerator, checkpoint_path=checkpoint_path, s3=s3)
+    
+    accelerator.wait_for_everyone()
 
     # Now we train the model
     if accelerator.is_main_process:
         print("Start training")
         start_time = time.time()
+    
+    epoch = 0
 
-    for epoch in range(0, args.num_epochs):
+    def handle_sigterm(signum, frame):
+        """Signal handler for SIGTERM."""
+        save_checkpoint(accelerator=accelerator, epoch=epoch, num_epochs=args.num_epochs, checkpoint_dir=args.checkpoint_dir, s3=s3)
+        print("Termination signal received. Exiting gracefully.")
+        exit(0)
+    
+    signal.signal(signal.SIGTERM, handle_sigterm)
+
+    for epoch in range(starting_epoch, args.num_epochs):
         model.train()
         total_loss = 0
         for step, batch in enumerate(train_dataloader):
@@ -137,8 +159,6 @@ def training_function(args: argparse.Namespace):
             optimizer.step()
             lr_scheduler.step()
             optimizer.zero_grad()
-
-            overall_step += 1
 
         model.eval()
         for step, batch in enumerate(eval_dataloader):
@@ -165,6 +185,10 @@ def training_function(args: argparse.Namespace):
             },
             step=epoch,
         )
+
+        # Save checkpoint if enabled
+        if args.enable_checkpointing and (epoch + 1) % args.checkpoint_interval == 0:
+            save_checkpoint(accelerator=accelerator, epoch=epoch, num_epochs=args.num_epochs, checkpoint_dir=args.checkpoint_dir, s3=s3)
 
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
@@ -193,6 +217,10 @@ def main():
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size. Adjust depending on GPU memory available")
     parser.add_argument("--num_epochs", type=int, default=12)
     parser.add_argument("--learning_rate", type=float, default=2e-5)
+    parser.add_argument("--enable_checkpointing", type=bool, default=False, help="enable automatic checkpointing")
+    parser.add_argument("--checkpoint_interval", type=int, default=50, help="automatic checkpoint epoch interval")
+    parser.add_argument("--checkpoint_dir", type=str, default="checkpoints", help="checkpoint dir name on aichor output bucket. Used for both loading and saving.")
+    parser.add_argument("--load_checkpoint_name", type=str, default=None, help="Checkpoint name to load. Leave this unset to automatically load from latest checkpoint.")
     args = parser.parse_args()
 
     training_function(args)
