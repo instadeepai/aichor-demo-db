@@ -19,7 +19,7 @@ builder:
 spec:
   operator: batchjob # or kuberay
   image: image
-  command: "torchrun --nproc_per_node 1 main.py --batch_size 200 --enable_checkpointing true --checkpoint_dir checkpoint_reload --num_epochs 200 --checkpoint_interval 10 --model openai-community/gpt2" # --nproc_per_node=={Number of GPUs}
+  command: "torchrun --nproc_per_node 1 main.py --batch_size 32 --enable_checkpointing true --checkpoint_dir checkpoint_reload --num_epochs 200 --checkpoint_interval 10 --model openai-community/gpt2" # --nproc_per_node=={Number of GPUs}
 
   restartPolicy:
     backoffLimit: 5
